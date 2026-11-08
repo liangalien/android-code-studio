@@ -60,10 +60,31 @@ tasks.configureEach {
     }
 }
 
+// l8DexDesugarLib* 被禁用后，AGP 的 compile*ArtProfile 仍可能查找其产物
+// baseline-prof.txt（见 CLAUDE.md / CI / tools/publish-release.ps1 的相同修复）。
+// 在任务执行前确保空文件存在，避免 "系统找不到指定的路径"。
+tasks.matching { it.name.matches(Regex("compile(Release|Dev|Debug)ArtProfile")) }.configureEach {
+    doFirst {
+        val variant = name.removePrefix("compile").removeSuffix("ArtProfile")
+        val l8Dir = layout.buildDirectory.dir(
+            "intermediates/l8_art_profile/${variant.replaceFirstChar { c -> c.lowercase() }}/l8DexDesugarLib$variant"
+        ).get().asFile
+        l8Dir.mkdirs()
+        val baseline = l8Dir.resolve("baseline-prof.txt")
+        if (!baseline.exists()) baseline.writeText("")
+    }
+}
+
 configurations.all {
   resolutionStrategy {
     force("com.google.guava:guava:32.1.3-android")
+    // 1.1.0+ 为 Java 21 bytecode，kapt/Java 17 工具链不兼容；强制对齐 1.0.0。
+    force("dev.snipme:highlights-jvm:1.0.0")
     eachDependency {
+      if (requested.group == "dev.snipme" && requested.name == "highlights-jvm") {
+        useVersion("1.0.0")
+        because("1.1.0+ targets Java 21 (major 65), incompatible with project JDK 17/kapt")
+      }
       if (requested.group == "com.google.guava" && requested.name == "guava") {
         if (requested.version?.contains("jre") == true) {
           useVersion("32.1.3-android")
@@ -87,24 +108,37 @@ android {
 
   signingConfigs {
       create("custom") {
-          val keyStorePath = "${rootProject.projectDir}/signing/signing-key.jks"
-          val keyStoreFile = file(keyStorePath)
-          
-          val signing_storePassword = System.getenv("SIGNING_STORE_PASSWORD") ?: ""
-          val signing_keyPassword = System.getenv("SIGNING_KEY_PASSWORD") ?: ""
-          // storeFile 与 keyAlias 支持环境变量覆盖：仓库内 signing-key.jks 的密码只在
-          // CI Secrets 里，本机无法还原；本机发布/调试用
-          // D:/android/keys/acs-debug-signing.jks（密码 android，别名 androidcs，
-          // 证书 SHA-1 83AB...C1DA，即已发布 r4/r5/r6 用的那把）。
-          // 未设置这两个变量时行为与之前完全一致（CI 仍走仓库内密钥）。
+          val repoKeyStoreFile = file("${rootProject.projectDir}/signing/signing-key.jks")
+          val debugKeyStoreFile = file("${System.getProperty("user.home")}/.android/debug.keystore")
+
+          val signing_storePasswordEnv = System.getenv("SIGNING_STORE_PASSWORD")
+          val signing_keyPasswordEnv = System.getenv("SIGNING_KEY_PASSWORD")
           val signing_storeFileEnv = System.getenv("SIGNING_STORE_FILE")
           val signing_keyAliasEnv = System.getenv("SIGNING_KEY_ALIAS")
-          
-          storeFile =
-              if (signing_storeFileEnv.isNullOrBlank()) keyStoreFile else file(signing_storeFileEnv)
-          storePassword = signing_storePassword
-          keyAlias = if (signing_keyAliasEnv.isNullOrBlank()) "androidcs" else signing_keyAliasEnv
-          keyPassword = signing_keyPassword
+
+          val hasExplicitSigning =
+              !signing_storePasswordEnv.isNullOrBlank() && !signing_keyPasswordEnv.isNullOrBlank()
+
+          val requestedStoreFile =
+              if (signing_storeFileEnv.isNullOrBlank()) repoKeyStoreFile else file(signing_storeFileEnv)
+          // Local fallback: repo signing key passwords live in CI secrets. When no explicit
+          // signing env vars are provided and the repo keystore isn't being explicitly used
+          // with credentials, fall back to the standard Android debug keystore so local
+          // assemble/package tasks can succeed without weakening CI signing.
+          val useDebugFallback =
+              !hasExplicitSigning && (signing_storeFileEnv.isNullOrBlank() || !requestedStoreFile.exists())
+
+          if (useDebugFallback && debugKeyStoreFile.exists()) {
+              storeFile = debugKeyStoreFile
+              storePassword = "android"
+              keyAlias = "androiddebugkey"
+              keyPassword = "android"
+          } else {
+              storeFile = requestedStoreFile
+              storePassword = signing_storePasswordEnv ?: ""
+              keyAlias = if (signing_keyAliasEnv.isNullOrBlank()) "androidcs" else signing_keyAliasEnv
+              keyPassword = signing_keyPasswordEnv ?: ""
+          }
       }
   }
 

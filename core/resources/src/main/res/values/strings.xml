@@ -788,6 +788,8 @@
       Display a notification banner when a Kotlin project is being indexed by the Kotlin Language Server.
   </string>
 
+  <string name="closing_project">Closing project</string>
+
   <string name="include_test_str">Include android tests</string>
   <string name="use_cmake">Use CMake build system</string>
   <string name="native_language">Native language</string>
